@@ -342,9 +342,27 @@ void ParticleVaultContainer::
 addExtraParticle( MC_Particle &particle)
 {
     uint64_t index = 0;
-    QS::atomicCaptureAdd( this->_extraVaultIndex, UINT64_C(1), index ); 
+    QS::atomicCaptureAdd( this->_extraVaultIndex, UINT64_C(1), index );
     uint64_t vault = index / this->_vaultSize;
     _extraVault[vault]->pushParticle( particle );
+}
+HOST_DEVICE_END
+
+//--------------------------------------------------------------
+//------------addExtraBaseParticle------------------------------
+//adds a base particle to the extra particle vaults. Used by the
+//GPU unpack kernel for particles received over RCCL/NCCL; mirrors
+//addExtraParticle but stores the already-built base particle so
+//no direction-cosine reconstruction is needed.
+//--------------------------------------------------------------
+HOST_DEVICE
+void ParticleVaultContainer::
+addExtraBaseParticle( MC_Base_Particle &particle)
+{
+    uint64_t index = 0;
+    QS::atomicCaptureAdd( this->_extraVaultIndex, UINT64_C(1), index );
+    uint64_t vault = index / this->_vaultSize;
+    _extraVault[vault]->pushBaseParticle( particle );
 }
 HOST_DEVICE_END
 

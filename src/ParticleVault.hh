@@ -36,6 +36,11 @@ public:
    // Access particle at a given index.
    MC_Base_Particle& operator[](size_t n) {return _particles[n];}
 
+   // Device-callable reference to a stored base particle (used by the GPU
+   // pack kernel to copy off-rank particles into communication buffers).
+   HOST_DEVICE_CUDA
+   MC_Base_Particle& getBaseParticleRef(int index) { return _particles[index]; }
+
    // Access a particle at a given index.
    const MC_Base_Particle& operator[](size_t n) const {return _particles[n];}
 

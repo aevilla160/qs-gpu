@@ -107,12 +107,34 @@ SHELL = /bin/bash
 #CPPFLAGS = -DHAVE_MPI -DHAVE_OPENMP -DHAVE_OPENMP_TARGET -DTARGET_AMD -I$(ROCM_ROOT)/include -Wno-unused-result
 #LDFLAGS = -L$(ROCM_ROOT)/lib -lamdhip64
 
-#AMD with HIP
-ROCM_ROOT = /opt/rocm-5.6.0
-CXX = /usr/tce/packages/cray-mpich/cray-mpich-8.1.26-rocmcc-5.6.0-cce-16.0.0a-magic/bin/mpicxx
-CXXFLAGS = -g 
-CPPFLAGS = -DHAVE_MPI -DHAVE_HIP -x hip --offload-arch=gfx90a -fgpu-rdc -Wno-unused-result
-LDFLAGS = -fgpu-rdc --hip-link --offload-arch=gfx90a
+#AMD with HIP + RCCL (GPU-resident collective particle communication)
+#
+# Parameterized: override on the command line or in the environment, e.g.
+#   make ROCM_ROOT=/opt/rocm-6.0.0 GPU_ARCH=gfx90a CXX=mpicxx
+#
+# Requirements on the target machine:
+#   - ROCm with HIP and RCCL (librccl) installed under $(ROCM_ROOT)
+#   - a GPU-aware MPI wrapper as $(CXX) (counts go over MPI; payloads over RCCL)
+#   - one GPU per MPI rank
+#
+# -DUSE_RCCL_COMM switches cycleTracking/Tallies onto the RCCL all-to-all-v
+# path. Drop it (but keep -DHAVE_RCCL) to build the RCCL wrappers without
+# replacing the MPI communication path.
+ROCM_ROOT ?= /opt/rocm-5.6.0
+GPU_ARCH  ?= gfx90a
+CXX       ?= mpicxx
+RCCL_CPPFLAGS = -DHAVE_RCCL -DUSE_RCCL_COMM -I$(ROCM_ROOT)/include
+RCCL_LDFLAGS  = -L$(ROCM_ROOT)/lib -lrccl
+CXXFLAGS = -g -O2
+CPPFLAGS = -DHAVE_MPI -DHAVE_HIP -x hip --offload-arch=$(GPU_ARCH) -fgpu-rdc -Wno-unused-result $(RCCL_CPPFLAGS)
+LDFLAGS  = -fgpu-rdc --hip-link --offload-arch=$(GPU_ARCH) $(RCCL_LDFLAGS)
+
+#AMD with HIP (no RCCL - original host-MPI communication path)
+#ROCM_ROOT = /opt/rocm-5.6.0
+#CXX = /usr/tce/packages/cray-mpich/cray-mpich-8.1.26-rocmcc-5.6.0-cce-16.0.0a-magic/bin/mpicxx
+#CXXFLAGS = -g
+#CPPFLAGS = -DHAVE_MPI -DHAVE_HIP -x hip --offload-arch=gfx90a -fgpu-rdc -Wno-unused-result
+#LDFLAGS = -fgpu-rdc --hip-link --offload-arch=gfx90a
 
 
 
@@ -296,6 +318,7 @@ SOURCES= \
     CoralBenchmark.cc \
     CycleTracking.cc \
     DecompositionObject.cc \
+    DeviceParticleExchange.cc \
     DirectionCosine.cc \
 	EnergySpectrum.cc \
     GlobalFccGrid.cc \
@@ -323,6 +346,7 @@ SOURCES= \
     ParticleVaultContainer.cc \
     PopulationControl.cc \
     SendQueue.cc \
+    rcclUtils.cc \
     SharedMemoryCommObject.cc \
     Tallies.cc \
     cmdLineParser.cc \

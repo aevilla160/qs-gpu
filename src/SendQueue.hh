@@ -28,6 +28,13 @@ class SendQueue
 
     sendQueueTuple& getTuple( int index_ );
 
+    //Device-callable accessors used by the GPU pack kernel
+    HOST_DEVICE_CUDA
+    int sizeDevice() { return _data.size(); }
+
+    HOST_DEVICE_CUDA
+    sendQueueTuple& getTupleDevice( int index_ ) { return _data[index_]; }
+
     //Add items to the send queue in a kernel
     HOST_DEVICE_CUDA
     void push( int neighbor_, int vault_index_ );

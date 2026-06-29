@@ -1,5 +1,6 @@
 #include "Tallies.hh"
 #include "utilsMpi.hh"
+#include "rcclUtils.hh"
 #include "MC_Time_Info.hh"
 #include "MC_Processor_Info.hh"
 #include "MonteCarlo.hh"
@@ -43,7 +44,12 @@ void Tallies::CycleFinalize(MonteCarlo *monteCarlo)
     tal.push_back(_balanceTask[0]._numSegments);
     vector<uint64_t> sum(tal.size());
 
+#if defined(USE_RCCL_COMM) && defined(GPU_COLLECTIVES)
+    // Global balance-tally reduction over RCCL/NCCL instead of host MPI.
+    rcclAllReduceSumUint64(&tal[0], &sum[0], (int)tal.size());
+#else
     mpiAllreduce(&tal[0], &sum[0], tal.size(), MPI_UINT64_T, MPI_SUM, monteCarlo->processor_info->comm_mc_world);
+#endif
 
     int index = 0;
     _balanceTask[0]._absorb = sum[index++];

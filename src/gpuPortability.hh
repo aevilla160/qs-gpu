@@ -45,6 +45,33 @@
 #define gpuSetDevice          CONCAT(__PREFIX, SetDevice)
 #define gpuPeekAtLastError    CONCAT(__PREFIX, PeekAtLastError)
 
+// --- Explicit-device-memory and stream API (added for the GPU-resident /
+// --- RCCL communication port).  These map to hip*/cuda* the same way the
+// --- macros above do.  __PREFIX is still in scope here (only __DO_CUDA /
+// --- __DO_HIP are undef'd, below).
+#define gpuMalloc               CONCAT(__PREFIX, Malloc)
+#define gpuMemcpy               CONCAT(__PREFIX, Memcpy)
+#define gpuMemcpyAsync          CONCAT(__PREFIX, MemcpyAsync)
+#define gpuMemset               CONCAT(__PREFIX, Memset)
+#define gpuMemsetAsync          CONCAT(__PREFIX, MemsetAsync)
+#define gpuMemcpyHostToDevice   CONCAT(__PREFIX, MemcpyHostToDevice)
+#define gpuMemcpyDeviceToHost   CONCAT(__PREFIX, MemcpyDeviceToHost)
+#define gpuMemcpyDeviceToDevice CONCAT(__PREFIX, MemcpyDeviceToDevice)
+#define gpuStream_t             CONCAT(__PREFIX, Stream_t)
+#define gpuStreamCreate         CONCAT(__PREFIX, StreamCreate)
+#define gpuStreamDestroy        CONCAT(__PREFIX, StreamDestroy)
+#define gpuStreamSynchronize    CONCAT(__PREFIX, StreamSynchronize)
+
+// Pinned host allocation has different spellings between vendors, so it is
+// not a simple CONCAT.  Provide small inline wrappers instead.
+#if defined __DO_HIP
+   static inline void gpuHostAllocPinned(void** p, size_t bytes) { hipHostMalloc(p, bytes); }
+   static inline void gpuHostFreePinned (void*  p)               { hipHostFree(p); }
+#elif defined __DO_CUDA
+   static inline void gpuHostAllocPinned(void** p, size_t bytes) { cudaMallocHost(p, bytes); }
+   static inline void gpuHostFreePinned (void*  p)               { cudaFreeHost(p); }
+#endif
+
 
 #undef __DO_CUDA
 #undef __DO_HIP

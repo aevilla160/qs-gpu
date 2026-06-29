@@ -23,6 +23,9 @@
 #include "CoralBenchmark.hh"
 #include "EnergySpectrum.hh"
 
+#include "rcclUtils.hh"
+#include "DeviceParticleExchange.hh"
+
 #include "git_hash.hh"
 #include "git_vers.hh"
 
@@ -43,8 +46,15 @@ int main(int argc, char** argv)
    Parameters params = getParameters(argc, argv);
    printParameters(params, cout);
 
-   // mcco stores just about everything. 
-   mcco = initMC(params); 
+   // mcco stores just about everything.
+   mcco = initMC(params);
+
+#if defined(USE_RCCL_COMM) && defined(GPU_COLLECTIVES)
+   // Bootstrap the RCCL/NCCL communicator from the MPI world used by QS.
+   rcclInit( mcco->processor_info->comm_mc_world,
+             mcco->processor_info->rank,
+             mcco->processor_info->num_processors );
+#endif
 
    int loadBalance = params.simulationParams.loadBalance;
 
@@ -71,6 +81,10 @@ int main(int argc, char** argv)
    gameOver();
 
    coralBenchmarkCorrectness(mcco, params);
+
+#if defined(USE_RCCL_COMM) && defined(GPU_COLLECTIVES)
+   rcclFinalize();
+#endif
 
 #ifdef HAVE_UVM
     mcco->~MonteCarlo();
@@ -135,6 +149,30 @@ GLOBAL void CycleTrackingKernel( MonteCarlo* monteCarlo, int num_particles, Part
 
 #endif
 
+#if defined(USE_RCCL_COMM) && defined(GPU_COLLECTIVES)
+//----------------------------------------------------------------------------
+//  RCCL/NCCL done-test: global allreduce of (gains, losses); done when equal.
+//  Mirrors mcp_test_done_class::Get_Local_Gains_And_Losses + Allreduce.
+//----------------------------------------------------------------------------
+static bool rcclTestDone( MonteCarlo* monteCarlo )
+{
+    if ( monteCarlo->processor_info->num_processors == 1 )
+        return ( monteCarlo->_particleVaultContainer->sizeProcessing() == 0 );
+
+    monteCarlo->_tallies->SumTasks();
+    Balance &bal = monteCarlo->_tallies->_balanceTask[0];
+
+    int64_t local[2];
+    local[0] = bal._start  + bal._source + bal._produce + bal._split;            // gains
+    local[1] = bal._absorb + bal._census + bal._escape  + bal._rr + bal._fission; // losses
+
+    int64_t global[2] = {0, 0};
+    rcclAllReduceSumInt64( local, global, 2 );
+
+    return ( global[0] == global[1] );
+}
+#endif
+
 void cycleTracking(MonteCarlo *monteCarlo)
 {
     MC_FASTTIMER_START(MC_Fast_Timer::cycleTracking);
@@ -145,6 +183,98 @@ void cycleTracking(MonteCarlo *monteCarlo)
     ExecutionPolicy execPolicy = getExecutionPolicy( monteCarlo->processor_info->use_gpu );
 
     ParticleVaultContainer &my_particle_vault = *(monteCarlo->_particleVaultContainer);
+
+#if defined(USE_RCCL_COMM) && defined(GPU_COLLECTIVES)
+    //========================================================================
+    // GPU-resident collective communication path.
+    //   per round: track every processing vault, packing off-rank particles
+    //   into device send slabs and draining fission secondaries; then a single
+    //   RCCL/NCCL all-to-all-v migrates particles between ranks; received
+    //   particles are folded into processing for the next round. Termination
+    //   is an RCCL allreduce done-test.
+    //========================================================================
+    (void)execPolicy; // this path always launches the native GPU kernel
+    static DeviceParticleExchange* exch = NULL;
+    if ( exch == NULL )
+    {
+        int nRanks = monteCarlo->processor_info->num_processors;
+        // Fixed per-neighbour capacity: bounded by this rank's working set plus
+        // one vault of slack. Increase (and nExtraVaults) if a run asserts on
+        // count overflow for dense neighbour traffic.
+        size_t nLocal = monteCarlo->_params.simulationParams.nParticles
+                        / (size_t)nRanks;
+        int maxPerRank = (int)( nLocal + my_particle_vault.getVaultSize() );
+        exch = new DeviceParticleExchange( nRanks, maxPerRank );
+    }
+
+    do
+    {
+        while ( !done )
+        {
+            exch->beginRound();
+
+            for ( uint64_t processing_vault = 0;
+                  processing_vault < my_particle_vault.processingSize();
+                  processing_vault++ )
+            {
+                MC_FASTTIMER_START(MC_Fast_Timer::cycleTracking_Kernel);
+                uint64_t processed_vault = my_particle_vault.getFirstEmptyProcessedVault();
+
+                ParticleVault *processingVault = my_particle_vault.getTaskProcessingVault(processing_vault);
+                ParticleVault *processedVault  = my_particle_vault.getTaskProcessedVault(processed_vault);
+
+                int numParticles = processingVault->size();
+
+                if ( numParticles != 0 )
+                {
+                    #if defined (GPU_NATIVE)
+                    dim3 grid(1,1,1);
+                    dim3 block(1,1,1);
+                    int runKernel = ThreadBlockLayout( grid, block, numParticles);
+                    if( runKernel )
+                       CycleTrackingKernel<<<grid, block >>>( monteCarlo, numParticles, processingVault, processedVault );
+                    gpuPeekAtLastError();
+                    gpuDeviceSynchronize();
+                    #endif
+                }
+
+                MC_FASTTIMER_STOP(MC_Fast_Timer::cycleTracking_Kernel);
+
+                MC_FASTTIMER_START(MC_Fast_Timer::cycleTracking_MPI);
+                // Pack this vault's off-rank particles into device send slabs.
+                SendQueue &sendQueue = *(my_particle_vault.getSendQueue());
+                exch->pack( &sendQueue, processingVault );
+
+                processingVault->clear();
+                sendQueue.clear();
+
+                // Fold fission secondaries created this kernel into processing
+                // (extends this round's vault loop, matching the MPI path).
+                my_particle_vault.cleanExtraVaults();
+                MC_FASTTIMER_STOP(MC_Fast_Timer::cycleTracking_MPI);
+            }
+
+            MC_FASTTIMER_START(MC_Fast_Timer::cycleTracking_MPI);
+            // One collective particle migration for the whole round.
+            exch->exchange( &my_particle_vault );
+            // Fold received particles into processing for the next round.
+            my_particle_vault.cleanExtraVaults();
+
+            my_particle_vault.collapseProcessing();
+            my_particle_vault.collapseProcessed();
+
+            done = rcclTestDone( monteCarlo );
+            MC_FASTTIMER_STOP(MC_Fast_Timer::cycleTracking_MPI);
+
+        } // while not done
+
+        done = rcclTestDone( monteCarlo );
+
+    } while ( !done );
+
+    MC_FASTTIMER_STOP(MC_Fast_Timer::cycleTracking);
+    return;
+#else
 
     //Post Inital Receives for Particle Buffer
     monteCarlo->particle_buffer->Post_Receive_Particle_Buffer( my_particle_vault.getVaultSize() );
@@ -304,6 +434,7 @@ void cycleTracking(MonteCarlo *monteCarlo)
     monteCarlo->particle_buffer->Free_Buffers();
 
    MC_FASTTIMER_STOP(MC_Fast_Timer::cycleTracking);
+#endif // USE_RCCL_COMM && GPU_COLLECTIVES
 }
 
 

@@ -77,6 +77,12 @@ class ParticleVaultContainer
     HOST_DEVICE
     void addExtraParticle( MC_Particle &particle );
     HOST_DEVICE_END
+
+    //Adds a base particle to the extra particle vault (used by the GPU
+    //unpack kernel to append particles received over RCCL/NCCL)
+    HOST_DEVICE
+    void addExtraBaseParticle( MC_Base_Particle &particle );
+    HOST_DEVICE_END
  
     //Pushes particles from Extra Vaults onto the Processing 
     //Vault list
